@@ -1,0 +1,155 @@
+---
+#Creator - K.Janarthanan
+#Purpose - To provision EC2 instance with MySql installed and with a pre-defined DB schema
+#Tested on Amazon Linux AMI 2018.03.0.20200318.2 x86_64 HVM gp2 [ami-0dff4318d85149d5d]
+#User Data is initialized with MetaData [cfn init]
+
+Parameters:
+  SSHKey:
+    Description: SSH Key Name
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: Key should be an existing one in AWS
+
+  DBName:
+    Description: DataBase Name
+    Type: String 
+    Default: 'SampleDB'
+    MaxLength: '30'
+    MinLength: '1'
+    AllowedPattern: ^[a-zA-Z0-9]+$
+    ConstraintDescription: "DataBase Name does not met requirements"
+
+  TableName:
+    Description: Data Table Name
+    Type: String
+    Default: 'SampleTable'
+    MaxLength: '30'
+    MinLength: '1'
+    AllowedPattern: ^[a-zA-Z0-9]+$
+    ConstraintDescription: "DataBase Name does not met requirements"
+
+  RootPass:
+    Description: Root Password for DataBase [Lower case and Upper Case with alphanumeric required]
+    NoEcho: True
+    Type: String
+    Default: 'Hello-World@123'
+    AllowedPattern: ^(?:(?=.*[a-z])(?:(?=.*[A-Z])(?=.*[\d\W])|(?=.*\W)(?=.*\d))|(?=.*\W)(?=.*[A-Z])(?=.*\d)).{8,}$
+    ConstraintDescription: "Password does not met the minimum requirements" 
+
+Mappings:
+  InstanceSettings:
+    DBInstance:
+      AMIID: ami-0dff4318d85149d5d
+      Size: t2.micro
+      TagKey: tier
+      TagValue: back-end
+    
+
+Resources:
+  MysqlInstance:
+    Type: 'AWS::EC2::Instance'
+    Metadata:
+      Comment: Installing MySql community server with predefined schema
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            "/tmp/dbschema.txt":
+              content: !Sub |
+                create database ${DBName};
+                use ${DBName};
+                CREATE TABLE ${TableName} (
+                id INT(6) UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                BookName VARCHAR(30) NOT NULL,
+                Author VARCHAR(30) NOT NULL,
+                Date VARCHAR(20)
+                );
+
+            "/tmp/dbinit.sh":
+              content: !Sub |
+                #!/bin/bash
+
+                yum install mysql51-server.x86_64 -y
+                service mysqld start
+      
+                echo "use mysql;update user set Password=PASSWORD('${RootPass}') where user='root';flush privileges;" | mysql -u root
+                cat /tmp/dbschema.txt | mysql -u root --password="${RootPass}"
+
+            "/etc/cfn/cfn-hup.conf":
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+              mode: "000400"
+              owner: "root"
+              group: "root"
+
+            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.Frontend.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource Frontend --region ${AWS::Region}
+              mode: "000400"
+              owner: "root"
+              group: "root"
+          
+          commands:
+            ChangeUSer:
+              command: "sudo -i"
+            DBCreate:
+              command: "sh /tmp/dbinit.sh"
+
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT5M
+
+    Properties:
+      KeyName: !Ref SSHKey
+      ImageId: !FindInMap [InstanceSettings, DBInstance, AMIID]
+      InstanceType: !FindInMap [InstanceSettings, DBInstance, Size]
+      SecurityGroups:
+        - !Ref SSHSecurityGroup
+      UserData:
+        "Fn::Base64":
+          !Sub |
+            #!/bin/bash -xe
+            yum update -y aws-cfn-bootstrap
+            # Start cfn-init
+            /opt/aws/bin/cfn-init -s ${AWS::StackId} -r MysqlInstance --region ${AWS::Region} || error_exit 'Failed to run cfn-init'
+            # Start up the cfn-hup daemon to listen for changes to the EC2 instance metadata
+            /opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+            # All done so signal success
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource MysqlInstance --region ${AWS::Region}
+      Tags:
+        - Key: !FindInMap [InstanceSettings, DBInstance, TagKey]
+          Value: !FindInMap [InstanceSettings, DBInstance, TagValue]
+ 
+  SSHSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: SSH Security Group
+      GroupDescription: SSH for servers to allow inbound traffic
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+   
+Outputs:
+  DBIP:
+    Description: IP Address of MySql Server
+    Value: !GetAtt MysqlInstance.PublicIp
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Database Configuration"
+        Parameters:
+          - DBName
+          - TableName
+          - RootPass
+      - Label:
+          default: "EC2 Configuration"
+        Parameters:
+          - SSHKey

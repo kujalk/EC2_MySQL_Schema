@@ -1,0 +1,111 @@
+---
+#Creator - K.Janarthanan
+#Purpose - To provision EC2 instance with MySql installed and with a pre-defined DB schema
+#Tested on RHEL 8
+#User Data is initialized with MetaData [cfn init]
+
+Parameters:
+  SSHKey:
+    Description: SSH Key Name
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: Key should be an existing one in AWS
+
+  DBName:
+    Description: DataBase Name
+    Type: String 
+    Default: 'SampleDB'
+    MaxLength: '30'
+    MinLength: '1'
+    AllowedPattern: ^[a-zA-Z0-9]+$
+    ConstraintDescription: "DataBase Name does not met requirements"
+
+  TableName:
+    Description: Data Table Name
+    Type: String
+    Default: 'SampleTable'
+    MaxLength: '30'
+    MinLength: '1'
+    AllowedPattern: ^[a-zA-Z0-9]+$
+    ConstraintDescription: "DataBase Name does not met requirements"
+
+  RootPass:
+    Description: Root Password for DataBase [Lower case and Upper Case with alphanumeric required]
+    NoEcho: True
+    Type: String
+    Default: 'Hello-World@123'
+    AllowedPattern: ^(?:(?=.*[a-z])(?:(?=.*[A-Z])(?=.*[\d\W])|(?=.*\W)(?=.*\d))|(?=.*\W)(?=.*[A-Z])(?=.*\d)).{8,}$
+    ConstraintDescription: "Password does not met the minimum requirements" 
+
+Mappings:
+  InstanceSettings:
+    DBInstance:
+      AMIID: ami-04a2d6660f1296314
+      Size: t2.micro
+      TagKey: tier
+      TagValue: back-end
+    
+
+Resources:
+  MysqlInstance:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      KeyName: !Ref SSHKey
+      ImageId: !FindInMap [InstanceSettings, DBInstance, AMIID]
+      InstanceType: !FindInMap [InstanceSettings, DBInstance, Size]
+      SecurityGroups:
+        - !Ref SSHSecurityGroup
+      UserData:
+        "Fn::Base64":
+          !Sub |
+            #!/bin/bash 
+
+            cat >/tmp/dbschema.txt <<EOL
+            create database ${DBName};
+            use ${DBName};
+            CREATE TABLE ${TableName} (
+            id INT(6) UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            BookName VARCHAR(30) NOT NULL,
+            Author VARCHAR(30) NOT NULL,
+            Date VARCHAR(20)
+            );
+            EOL
+
+            yum install mysql-server.x86_64 -y
+            service mysqld start
+
+            echo "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${RootPass}';" | mysql -u root
+            cat /tmp/dbschema.txt | mysql -u root --password="${RootPass}"
+
+      Tags:
+        - Key: !FindInMap [InstanceSettings, DBInstance, TagKey]
+          Value: !FindInMap [InstanceSettings, DBInstance, TagValue]
+ 
+  SSHSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: SSH Security Group
+      GroupDescription: SSH for servers to allow inbound traffic
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+   
+Outputs:
+  DBIP:
+    Description: IP Address of MySql Server
+    Value: !GetAtt MysqlInstance.PublicIp
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Database Configuration"
+        Parameters:
+          - DBName
+          - TableName
+          - RootPass
+      - Label:
+          default: "EC2 Configuration"
+        Parameters:
+          - SSHKey
